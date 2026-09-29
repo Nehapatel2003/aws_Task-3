@@ -4,6 +4,8 @@ const {s3} = require('../Config/aws_Config');
 const {uploadDocumentModel ,accessKeyModel,deleteDocumentModel} = require('../Model/document_Model')
 const sendNotification = require('../Services/sns_Services')
 const path = require("path")
+const sendLog = require('../Utils/logger')
+const cloudWatchCustomMetrics = require('../Utils/metrics')
 
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");   //pre-sign URL
 
@@ -16,6 +18,7 @@ const uploadS3 = async (req) =>{
     let baseObjectURL =`https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/`
     let documentURL =`${baseObjectURL}${documentKey}`
       
+    try{
     await uploadDocumentModel(req.user.id,req.file.originalname,documentKey,documentURL,req.file.size,req.file.mimetype); 
     await s3.send(       
         new PutObjectCommand({
@@ -26,29 +29,61 @@ const uploadS3 = async (req) =>{
             ServerSideEncryption: "AES256"
         })
     );
+    await cloudWatchCustomMetrics("UploadSuccessCount", 1, "Count")
     await sendNotification(req, documentKey);
-
-// await sendLog({INFO: "S3 upload successful"})  
-// await cloudWatchCustomMetrics("DocumentsUploaded") 
-
-// try{
-//     // await sendNotification(req)
-//     await cloudWatchCustomMetrics("SNSNotificationsSent")
-//     // await cloudWatchCustomMetrics("SNSNotificationsFailed")
-//     }catch{
-//         await cloudWatchCustomMetrics("SNSNotificationsFailed")
-//     }
+    await sendLog({
+    level: "INFO",
+    message: "SNS Notification  Published ",
+    requestId: req.requestId,
+    userId: req.user.id,
+    route: req.originalUrl,
+    statusCode: 201,
+   })
+    await sendLog({
+    level: "INFO",
+    message: "Document uploaded successfully",
+    requestId: req.requestId,
+    userId: req.user.id,
+    route: req.originalUrl,
+    statusCode: 201,
+})
+   }catch(err){
+    await cloudWatchCustomMetrics("UploadFailureCount", 1, "Count")
+    await cloudWatchCustomMetrics("S3OperationFailureCount", 1, "Count");
+    await sendLog({
+        level: "ERROR",
+        message: "Document upload Failed ",
+        requestId: req.requestId,
+        userId: req.user.id,
+        route: req.originalUrl,
+        statusCode: 500,
+    })
+   } 
 };
 
 
-const  downloadS3 = async(req) =>{
-    const [document] = await accessKeyModel(req.params.id)
-    const url = await getSignedUrl(s3,new GetObjectCommand({
-        Bucket:process.env.AWS_S3_BUCKET,
-        Key : document[0].s3_key
-    }) ,{expiresIn:300})
-    return url;
-}
+const downloadS3 = async (req) => {
+    try {
+        const [document] = await accessKeyModel(req.params.id);
+        const url = await getSignedUrl(s3,
+            new GetObjectCommand({
+                Bucket: process.env.AWS_S3_BUCKET,
+                Key: document[0].s3_key
+            }),{ expiresIn: 300 });
+        await sendLog({
+            level: "INFO",
+            message: "Document pre-sign URL generated successfully",
+            requestId: req.requestId,
+            userId: req.user.id,
+            route: req.originalUrl,
+            statusCode: 200
+        });
+        return url
+    } catch (err) {
+        console.log("Download error:", err);
+        throw err;
+    }
+};
 
 
 const  deleteS3 = async (req) => {
@@ -65,9 +100,17 @@ const  deleteS3 = async (req) => {
                 Key: s3_key
             })
         );
+        await sendLog({
+        level: "INFO",
+        message: "Document deleted successfully",
+        requestId: req.requestId,
+        userId: req.user.id,
+        route: req.originalUrl,
+        statusCode: 2,
+        })
         await deleteDocumentModel(req.params.id);
         return ("Document Deleted Successfully . ")
-    } catch (err) {
+        } catch (err) {
         console.log("Delete error:", err);
     }
 };
